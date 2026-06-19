@@ -1,15 +1,12 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
-using System.Linq;
 using Content.Server.Station.Components;
 using Content.Shared.Atmos;
-using Content.Shared.Atmos.Components;
 using Content.Shared.GameTicking.Components;
 using Content.Shared.Station.Components;
 using Robust.Shared.Collections;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
-using Robust.Shared.Utility;
 
 namespace Content.Server.GameTicking.Rules;
 
@@ -177,7 +174,7 @@ public abstract partial class GameRuleSystem<T> where T: IComponent
     {
         while (iterator.MoveNext())
         {
-            if (iterator.Current.Value.Air != null)
+            if (iterator.Current.Value.Air != null || iterator.Current.Value.Space)
             {
                 vector = iterator.Current.Key;
                 return true;
