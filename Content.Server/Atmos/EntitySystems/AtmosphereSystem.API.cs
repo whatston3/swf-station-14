@@ -1,5 +1,7 @@
 using System.Buffers;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics.Tensors;
 using Content.Server.NodeContainer.NodeGroups;
 using Content.Shared.Atmos;
@@ -59,6 +61,24 @@ public partial class AtmosphereSystem
         RaiseLocalEvent(gridUid, ref ev);
 
         return ev.Simulated;
+    }
+
+    /// <summary>
+    /// Tries to get a readonly copy of the raw TileAtmosphere data from the given entity.
+    /// </summary>
+    /// <param name="entity">The entity to get the atmosphere data from.</param>
+    /// <param name="tiles">The dictionary storing a readonly copy of the TileAtmosphere data from the entity given.</param>
+    /// <returns>True if the atmosphere data was returned, false otherwise</returns>
+    [PublicAPI]
+    public bool TryGetTiles(Entity<GridAtmosphereComponent?> entity, [NotNullWhen(true)] out ReadOnlyDictionary<Vector2i, TileAtmosphere>? tiles)
+    {
+        if (!_gridAtmosQuery.Resolve(entity.Owner, ref entity.Comp, false))
+        {
+            tiles = null;
+            return false;
+        }
+        tiles = new(entity.Comp.Tiles);
+        return true;
     }
 
     /// <summary>

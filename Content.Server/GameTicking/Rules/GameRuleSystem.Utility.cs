@@ -1,8 +1,10 @@
+using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using Content.Server.Station.Components;
+using Content.Shared.Atmos;
+using Content.Shared.Atmos.Components;
 using Content.Shared.GameTicking.Components;
-using Content.Shared.Random.Helpers;
 using Content.Shared.Station.Components;
 using Robust.Shared.Collections;
 using Robust.Shared.Map;
@@ -83,76 +85,106 @@ public abstract partial class GameRuleSystem<T> where T: IComponent
     protected bool TryFindRandomTileOnStation(Entity<StationDataComponent> station,
         out Vector2i tile,
         out EntityUid targetGrid,
-        out EntityCoordinates targetCoords,
-        int numAttempts = 10)
+        out EntityCoordinates targetCoords)
     {
         tile = default;
         targetCoords = EntityCoordinates.Invalid;
         targetGrid = EntityUid.Invalid;
 
-        // Weight grid choice by tilecount
+        // Weight grid choice by valid tilecount (as judged by GridAtmosphere)
         var totalTiles = 0;
-        var grids = new List<(Entity<MapGridComponent> Entity, List<TileRef> Tiles)>();
+        var grids = new List<(Entity<MapGridComponent> Entity, ReadOnlyDictionary<Vector2i, TileAtmosphere> Tiles)>();
         foreach (var possibleTarget in station.Comp.Grids)
         {
-            if (!TryComp<MapGridComponent>(possibleTarget, out var comp))
+            if (!_atmosphere.TryGetTiles(possibleTarget, out var tiles)
+                || tiles.Count <= 0
+                || !TryComp<MapGridComponent>(possibleTarget, out var mapGrid))
                 continue;
 
-            // Get the whole list of tiles for the given grid.
-            // Ideally, we would be able to get the total count based on all of the grid's chunks
-            // And then find the Nth available tile within that grid (in some sane order) later.
-            var tileList = _map.GetAllTiles(possibleTarget, comp).ToList();
-
-            // Just to be sure, no empty elements.
-            if (tileList.Count > 0)
-            {
-                grids.Add(((possibleTarget, comp), tileList));
-                totalTiles += tileList.Count();
-            }
+            grids.Add(((possibleTarget, mapGrid), tiles));
+            totalTiles += tiles.Count;
         }
 
-        if (grids.Count == 0)
-        {
-            targetGrid = EntityUid.Invalid;
+        if (grids.Count <= 0)
             return false;
-        }
 
-        for (var i = 0; i < numAttempts; i++)
+        // Pick a random tile index, find your starting dictionary from that.
+        var startingTileIndex = RobustRandom.Next(totalTiles);
+        var tilesSoFar = 0;
+        var startingGridIndex = 0;
+        for (var i = 0; i < grids.Count; i++)
         {
-            // Find random tile within list.
-            var nextTileIndex = RobustRandom.Next(totalTiles);
-            TileRef? randomTileRef = null;
-            MapGridComponent gridComp = default!;
-            var startIndex = 0;
-            foreach (var grid in grids)
+            if (tilesSoFar + grids[i].Tiles.Count > startingTileIndex)
             {
-                // If the index is in this particular grid, find it and remove the tile to prevent selecting it twice.
-                if (startIndex + grid.Tiles.Count > nextTileIndex)
-                {
-                    (targetGrid, gridComp) = grid.Entity;
-                    randomTileRef = grid.Tiles[nextTileIndex - startIndex];
-                    grid.Tiles.RemoveSwap(nextTileIndex - startIndex);
-                    totalTiles--;
-                    break;
-                }
-
-                startIndex += grid.Tiles.Count;
+                startingGridIndex = i;
+                startingTileIndex = startingTileIndex - tilesSoFar; // convert overall index to grid index
+                break;
             }
 
-            // Out of valid tiles, or the lookup is buggy.
-            if (randomTileRef is not { } tileRef)
-                return false;
-
-            if (_atmosphere.IsTileSpace(targetGrid, Transform(targetGrid).MapUid, tileRef.GridIndices)
-                || _atmosphere.IsTileAirBlockedCached(targetGrid, tile))
-            {
-                continue;
-            }
-
-            targetCoords = _map.GridTileToLocal(targetGrid, gridComp, tile);
-            return true;
+            tilesSoFar += grids[i].Tiles.Count;
         }
 
+        // Iterate from your starting position to the end of the grid set.
+        for (var i = startingGridIndex; i < grids.Count; i++)
+        {
+            var iterator = grids[i].Tiles.GetEnumerator();
+            // Start from tile index
+            if (i == startingGridIndex)
+            {
+                for (var j = 0; j < startingTileIndex; j++)
+                    iterator.MoveNext();
+            }
+            if (TryGetFirstPosition(iterator, out tile))
+            {
+                targetGrid = grids[i].Entity;
+                targetCoords = _map.GridTileToLocal(targetGrid, grids[i].Entity.Comp, tile);
+                return true;
+            }
+        }
+
+        // Iterate from the start of the dict back to the starting position.
+        for (var i = 0; i < startingGridIndex; i++)
+        {
+            var iterator = grids[i].Tiles.GetEnumerator();
+            if (i == startingGridIndex)
+            {
+                // Starting position: cover positions up to (not including) startingTileIndex
+                var index = 0;
+                while (index < startingTileIndex && iterator.MoveNext())
+                {
+                    if (iterator.Current.Value.Air != null)
+                    {
+                        targetGrid = grids[i].Entity;
+                        tile = iterator.Current.Key;
+                        targetCoords = _map.GridTileToLocal(targetGrid, grids[i].Entity.Comp, tile);
+                        return true;
+                    }
+                    index++;
+                }
+            }
+            else if (TryGetFirstPosition(iterator, out tile))
+            {
+                targetGrid = grids[i].Entity;
+                targetCoords = _map.GridTileToLocal(targetGrid, grids[i].Entity.Comp, tile);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryGetFirstPosition(IEnumerator<KeyValuePair<Vector2i, TileAtmosphere>> iterator, out Vector2i vector)
+    {
+        while (iterator.MoveNext())
+        {
+            if (iterator.Current.Value.Air != null)
+            {
+                vector = iterator.Current.Key;
+                return true;
+            }
+        }
+
+        vector = default;
         return false;
     }
 
