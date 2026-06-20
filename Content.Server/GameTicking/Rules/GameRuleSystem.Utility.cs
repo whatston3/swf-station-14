@@ -140,7 +140,7 @@ public abstract partial class GameRuleSystem<T> where T: IComponent
         }
 
         // Iterate from the start of the dict back to the starting position.
-        for (var i = 0; i < startingGridIndex; i++)
+        for (var i = 0; i <= startingGridIndex; i++)
         {
             var iterator = grids[i].Tiles.GetEnumerator();
             if (i == startingGridIndex)
