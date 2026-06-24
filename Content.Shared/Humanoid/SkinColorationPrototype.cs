@@ -342,18 +342,6 @@ public sealed partial class ClampedHslColoration : ISkinColorationStrategy
 [Serializable, NetSerializable]
 public sealed partial class HueNodeClampedHsvColoration : ISkinColorationStrategy
 {
-    // FIXME: this is awful - why is it so large?
-    /// <summary>
-    /// The maximum amount of change to the saturation that we can expect between generating an HSV value
-    /// at a threshold, converting it to RGB, then resaving it.
-    /// Found experimentally by running HumanoidProfileTests.EnsureValidRandomSpecies("Vulpkanin") many times.
-    /// </summary>
-    /// <remarks>
-    /// Due to RGB colors being clamped to 8 bits, precision is lost during transformation to HSL or HSV.
-    /// The precision of the result _should be_ approximately 1/180.
-    /// </remarks>
-    public const float HSVTolerance = 0.019f;
-
     /// <summary>
     /// List of valid nodes in this coloration.
     /// </summary>
@@ -361,6 +349,19 @@ public sealed partial class HueNodeClampedHsvColoration : ISkinColorationStrateg
     public List<HueNodeClampedHsvColorationNode> Nodes = default!;
 
     public SkinColorationStrategyInput InputType => SkinColorationStrategyInput.Color;
+
+    /// <summary>
+    /// Maximum value to check all hues in VerifySkinColor.
+    /// </summary>
+    private const float MaxAllHueValue = 3f * SkinColorationUtils.Epsilon;
+    /// <summary>
+    /// The higher of the two hue wrap thresholds.
+    /// </summary>
+    private const float HueWrapHighThreshold = 0.667f;
+    /// <summary>
+    /// The lower of the two hue wrap thresholds.
+    /// </summary>
+    private const float HueWrapLowThreshold = 0.333f;
 
     public bool VerifySkinColor(Color color, [NotNullWhen(false)] out string? reason)
     {
@@ -373,28 +374,64 @@ public sealed partial class HueNodeClampedHsvColoration : ISkinColorationStrateg
 
         var range = GetNodeValuesForHue(hue);
 
-        // If no range was found, this color is invalid.
-        if (range is null)
+        // In bounds? Life is good.
+        if (range is not null
+            && hsv.Y >= range.Saturation.Min
+            && hsv.Y <= range.Saturation.Max
+            && hsv.Z >= range.Value.Min
+            && hsv.Z <= range.Value.Max)
         {
-            reason = "No valid range was found.";
-            return false;
+            return true;
         }
 
-        // If a range is found, check if the saturation is within the provided ranges.
-        if (hsv.Y < range.Saturation.Min - HSVTolerance || hsv.Y > range.Saturation.Max + HSVTolerance)
+        // Otherwise, check sensitivity (assuming a max. loss of RGB precision of 1), create a bounding box from that, and iterate through the segments.
+        var minH = float.MaxValue;
+        var maxH = -float.MaxValue;
+        var minS = float.MaxValue;
+        var maxS = -float.MaxValue;
+        var minV = float.MaxValue;
+        var maxV = -float.MaxValue;
+        Color newColor = color;
+        for (var dr = -1; dr <= 1; dr += 2)
         {
-            reason = $"Saturation {hsv.Y} is outside of range of min {range.Saturation.Item1} max {range.Saturation.Item2}";
-            return false;
+            newColor.R = float.Clamp(color.R + dr * SkinColorationUtils.Epsilon, 0.0f, 1.0f);
+            for (var dg = -1; dg <= 1; dg += 2)
+            {
+                newColor.G = float.Clamp(color.G + dg * SkinColorationUtils.Epsilon, 0.0f, 1.0f);
+                for (var db = -1; db <= 1; db += 2)
+                {
+                    newColor.B = float.Clamp(color.B + db * SkinColorationUtils.Epsilon, 0.0f, 1.0f);
+
+                    var newHsv = Color.ToHsv(newColor);
+
+                    // Check new color bounds against our existing min/max
+                    minH = float.Min(minH, newHsv.X);
+                    maxH = float.Max(maxH, newHsv.X);
+                    minS = float.Min(minS, newHsv.Y);
+                    maxS = float.Max(maxS, newHsv.Y);
+                    minV = float.Min(minV, newHsv.Z);
+                    maxV = float.Max(maxV, newHsv.Z);
+                }
+            }
         }
 
-        // Check if the value is within provided ranges.
-        if (hsv.Z < range.Value.Min - HSVTolerance || hsv.Z > range.Value.Max + HSVTolerance)
+        // Check nodes w.r.t. sensitivity box.
+        if (hsv.Z <= MaxAllHueValue)
         {
-            reason = $"Value {hsv.Z} is outside of range of min {range.Value.Min} max {range.Value.Max}";
-            return false;
+            // Low value: check the whole hue range (degenerate case)
+            return CheckSaturationAndValue(0.0f, 1.0f, minS, maxS, minV, maxV);
         }
-
-        return true;
+        else if (hsv.X > HueWrapHighThreshold && minH < HueWrapLowThreshold
+            || hsv.X < HueWrapLowThreshold && maxH > HueWrapHighThreshold)
+        {
+            // Hue wrap check, bounds should be large enough to catch wraparound at values beyond MaxAllHueValue.
+            return CheckSaturationAndValue(0.0f, minH, minS, maxS, minV, maxV)
+            || CheckSaturationAndValue(maxH, 1.0f, minS, maxS, minV, maxV);
+        }
+        else
+        {
+            return CheckSaturationAndValue(minH, maxH, minS, maxS, minV, maxV);
+        }
     }
 
     /// <inheritdoc/>
@@ -481,6 +518,34 @@ public sealed partial class HueNodeClampedHsvColoration : ISkinColorationStrateg
         finalNode.Value.Max = MathHelper.Lerp(firstNode.Value.Max, secondNode.Value.Max, weight);
 
         return finalNode;
+    }
+
+    /// <summary>
+    /// Checks if a rectangular set of hue/saturation and hue/value bounds overlaps with the coloration's nodes.
+    /// Used to check if a point could have reasonably come from the thresholded HSV bounds of a saturation wrap.
+    /// </summary>
+    private bool CheckSaturationAndValue(float minH, float maxH, float minS, float maxS, float minV, float maxV)
+    {
+        if (Nodes.Count == 0)
+        {
+            return false;
+        }
+        if (Nodes.Count == 1)
+        {
+            var node = Nodes[0];
+            // TODO: ensure min/maxS, min/maxV overlap with Nodes.Saturation, Nodes.Value (rect overlap)
+            return false;
+        }
+
+        var firstNode = Nodes[0];
+        for (int i = 1; i < Nodes.Count; i++)
+        {
+            var secondNode = Nodes[i];
+            // TODO: if hue range within (min/maxH), check min/maxS, min/maxV overlap with Nodes.Saturation, Nodes.Value (parallelogram vs. rect)
+            return false;
+        }
+
+        return false;
     }
 }
 
