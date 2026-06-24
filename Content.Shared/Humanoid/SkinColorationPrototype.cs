@@ -541,7 +541,7 @@ public sealed partial class HueNodeClampedHsvColoration : ISkinColorationStrateg
         for (int i = 1; i < Nodes.Count; i++)
         {
             var secondNode = Nodes[i];
-            // TODO: if hue range within (min/maxH), check min/maxS, min/maxV overlap with Nodes.Saturation, Nodes.Value (parallelogram vs. rect)
+            // TODO: if hue range within (min/maxH), check min/maxS, min/maxV overlap with Nodes.Saturation, Nodes.Value (trapezoid vs. rect)
             return false;
         }
 
